@@ -1,0 +1,16 @@
+# Exclude from Docker build context
+__pycache__/
+*.py[cod]
+*.egg-info/
+logs/
+outputs/
+wandb/
+video/
+.git/
+.vscode/
+.idea/
+*.md
+!README.md
+# Exclude large motion data (should be downloaded separately)
+source/whole_body_tracking/data/ASAP/*.pkl
+source/whole_body_tracking/data/motion_npz/*/

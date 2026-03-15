@@ -1,0 +1,50 @@
+# ============================
+# BeyondMimic .gitignore
+# ============================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# --- Training Logs & Outputs ---
+logs/
+outputs/
+wandb/
+video/
+
+# --- Motion Data (needs separate download) ---
+# ASAP raw data (pkl files)
+source/whole_body_tracking/data/ASAP/*.pkl
+# Converted npz motion data
+source/whole_body_tracking/data/motion_npz/*/
+
+# --- IDE & Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- Isaac Sim Cache ---
+_isaac_sim
+*.usd
+*.usda
+*.usdc
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Environment ---
+.env
+*.env
+
+# --- OS ---
+Thumbs.db
+.DS_Store
