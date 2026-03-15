@@ -146,7 +146,22 @@ bash scripts/batch_asap_to_npz.sh
 
 ### 前提条件
 
-- NVIDIA GPU（≥6 GB VRAM，推荐 RTX 3060 及以上）
+**支持的操作系统**：
+
+| 系统 | 支持情况 | 说明 |
+|------|----------|------|
+| Ubuntu 22.04 | ✅ 完全支持 | 推荐，原生运行或 Docker |
+| Ubuntu 24.04 | ✅ 支持 | Isaac Sim 官方支持 |
+| Ubuntu 20.04 | ❌ 不支持 | Isaac Sim 5.0.0 已不支持 20.04 |
+| Windows 10/11（WSL2） | ⚠️ 部分支持 | 需额外配置 WSL2 GPU 直通，不推荐 |
+| macOS | ❌ 不支持 | Isaac Sim 无 macOS 版本 |
+
+> Isaac Sim 5.0.0 仅支持 Ubuntu 22.04 / 24.04。Docker 容器模式仅支持 Linux 宿主机。
+
+**硬件与软件要求**：
+
+- NVIDIA GPU（≥4 GB VRAM，推荐 RTX 3060 及以上）
+- NVIDIA Driver ≥ 535（支持 CUDA 12.x）
 - 已按上方 [环境配置](#-环境配置必读) 完成 Docker 镜像构建和容器启动
 - 容器内已执行 `setup.py develop` 安装 Extension（Dockerfile 已自动完成）
 
