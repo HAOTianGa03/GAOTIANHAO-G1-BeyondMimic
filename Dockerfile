@@ -4,8 +4,6 @@ ENV ISAACSIM_ROOT_PATH=/isaac-sim
 ENV ISAACLAB_PATH=/app/IsaacLab
 ENV DOCKER_USER_HOME=/root
 
-ENV MAX_JOBS=1
-ENV TZ=Asia/Shanghai
 
 # TORCH_CUDA_ARCH_LIST: space-separated SM versions for pytorch3d compilation.
 # Override at build time for your GPU:
