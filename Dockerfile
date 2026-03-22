@@ -81,10 +81,7 @@ RUN mkdir -p ${ISAACSIM_ROOT_PATH}/kit/cache && \
 # Install Isaac Lab core
 RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
     ${ISAACLAB_PATH}/_isaac_sim/kit/python/bin/python3 -m pip install --upgrade pip && \
-    ${ISAACLAB_PATH}/_isaac_sim/kit/python/bin/python3 -m pip uninstall -y packaging 2>/dev/null || true && \
-    ${ISAACLAB_PATH}/isaaclab.sh --install && \
-    ${ISAACLAB_PATH}/_isaac_sim/kit/python/bin/python3 -m pip uninstall -y packaging 2>/dev/null || true && \
-    ${ISAACLAB_PATH}/_isaac_sim/kit/python/bin/python3 -m pip install "packaging==24.2" --no-deps
+    ${ISAACLAB_PATH}/isaaclab.sh --install
 
 RUN ${ISAACLAB_PATH}/isaaclab.sh -p -m pip uninstall -y quadprog
 
@@ -121,41 +118,21 @@ RUN echo 'export CUDA_HOME=/usr/local/cuda-12.8' >> /root/.bashrc && \
 # ==========================================================================
 # Step 4: Python dependencies (smplx, pytorch3d, etc.)
 # ==========================================================================
-RUN ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install smplx termcolor dm_tree prettytable && \
+RUN ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install smplx termcolor dm_tree prettytable flatdict && \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install "git+https://github.com/otaheri/chamfer_distance.git" && \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install "git+https://github.com/lixiny/manotorch.git" && \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install "git+https://github.com/otaheri/bps_torch"
 
-# pytorch3d from source (requires FORCE_CUDA + _structures.py fix)
+# pytorch3d from source (requires FORCE_CUDA + no-build-isolation)
+# Fix torch vendor packaging issue by copying from installed packaging
+RUN ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install "packaging>=24.0" && \
+    rm -f /app/IsaacLab/_isaac_sim/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging/_structures.py && \
+    cp /app/IsaacLab/_isaac_sim/kit/python/lib/python3.11/site-packages/packaging/_structures.py \
+       /app/IsaacLab/_isaac_sim/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging/_structures.py
 RUN export FORCE_CUDA=1 && \
     export CUDA_HOME=/usr/local/cuda-12.8 && \
-    STRUCTS="/app/IsaacLab/_isaac_sim/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging/_structures.py" && \
-    rm -f "${STRUCTS}" && \
-    printf '%s\n' \
-        'class InfinityType:' \
-        '    def __repr__(self): return "Infinity"' \
-        '    def __hash__(self): return hash(repr(self))' \
-        '    def __lt__(self, other): return False' \
-        '    def __le__(self, other): return False' \
-        '    def __eq__(self, other): return isinstance(other, self.__class__)' \
-        '    def __gt__(self, other): return True' \
-        '    def __ge__(self, other): return True' \
-        '    def __neg__(self): return NegativeInfinity' \
-        'Infinity = InfinityType()' \
-        'class NegativeInfinityType:' \
-        '    def __repr__(self): return "-Infinity"' \
-        '    def __hash__(self): return hash(repr(self))' \
-        '    def __lt__(self, other): return True' \
-        '    def __le__(self, other): return True' \
-        '    def __eq__(self, other): return isinstance(other, self.__class__)' \
-        '    def __gt__(self, other): return False' \
-        '    def __ge__(self, other): return False' \
-        '    def __neg__(self): return Infinity' \
-        'NegativeInfinity = NegativeInfinityType()' \
-        > "${STRUCTS}" && \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git" && \
-    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install --no-build-isolation "git+https://github.com/mattloper/chumpy@9b045ff5d6588a24a0bab52c83f032e2ba433e17" && \
-    ${ISAACLAB_PATH}/_isaac_sim/kit/python/bin/python3 -m pip uninstall -y packaging 2>/dev/null || true
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install --no-build-isolation "git+https://github.com/mattloper/chumpy@9b045ff5d6588a24a0bab52c83f032e2ba433e17"
 
 # ==========================================================================
 # Step 5: Fix Python path registrations (warp + isaaclab editable install)
@@ -220,6 +197,7 @@ def install():
         ns = _EditableNamespaceFinder()
         _EditableNamespaceFinder._install_hook(ns)
 FINDER_EOF
+RUN SITE="/app/IsaacLab/_isaac_sim/kit/python/lib/python3.11/site-packages" && \
     echo 'import __editable___isaaclab_1_4_1_finder; __editable___isaaclab_1_4_1_finder.install()' \
         > "${SITE}/__editable__.isaaclab-1.4.1.pth" && \
     echo "warp + isaaclab path registration done"
@@ -235,8 +213,8 @@ COPY scripts/ ${MIMIC_MODEL_PATH}/scripts/
 COPY README.md ${MIMIC_MODEL_PATH}/
 
 # Install Extension in editable mode
-RUN cd ${MIMIC_MODEL_PATH} && \
-    ${ISAACLAB_PATH}/_isaac_sim/python.sh source/whole_body_tracking/setup.py develop && \
+RUN cd ${MIMIC_MODEL_PATH}/source/whole_body_tracking && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh setup.py develop && \
     echo "whole_body_tracking installed successfully"
 
 # Create data placeholder directories
