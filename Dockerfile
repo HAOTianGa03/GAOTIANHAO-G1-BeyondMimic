@@ -43,6 +43,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     git \
     libglib2.0-0 \
     ncurses-term \
+    openssh-client \
     wget \
     tini && \
     apt -y autoremove && apt clean autoclean && \
@@ -85,6 +86,51 @@ RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
 
 RUN ${ISAACLAB_PATH}/isaaclab.sh -p -m pip uninstall -y quadprog
 
+# isaaclab_rl/rsl-rl-lib pull in torch unpinned, so pip resolves whatever the
+# newest release is (observed: torch 2.13.0+cu130). That build's compiled
+# extensions fail to initialize inside Isaac Sim 5.0.0's embedded Kit Python
+# ("module 'torch' has no attribute 'Tensor'/'jit'" while loading
+# isaacsim.core.* / isaaclab_assets / isaaclab_tasks extensions), and pip's
+# newest typing_extensions enforces stricter PEP 696 ordering than torch's own
+# _inductor code satisfies ("Type parameter ... without a default follows type
+# parameter with a default"). Pin both to the versions this image is actually
+# validated against (matches docs/docker_setup.md's documented torch
+# 2.7.0+cu128) to avoid both failure modes.
+RUN ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install \
+    torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128 && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install "typing_extensions==4.12.2"
+
+# The torch==2.7.0+cu128 wheel ships a malformed RPATH in libtorch_cuda.so
+# (and friends): every other bundled CUDA lib entry reads
+# "$ORIGIN/../../nvidia/<pkg>/lib" but the cusparselt entry is missing the
+# "nvidia/" path segment ("$ORIGIN/../../cusparselt/lib"), so the loader
+# looks in site-packages/cusparselt/lib instead of the real
+# site-packages/nvidia/cusparselt/lib and `import torch` fails with
+# "ImportError: libcusparseLt.so.0: cannot open shared object file". A
+# symlink at the path the RPATH actually expects fixes it without touching
+# LD_LIBRARY_PATH (RPATH is consulted before LD_LIBRARY_PATH, so widening
+# LD_LIBRARY_PATH alone wouldn't help every caller).
+RUN SITE="/app/IsaacLab/_isaac_sim/kit/python/lib/python3.11/site-packages" && \
+    ln -s "${SITE}/nvidia/cusparselt" "${SITE}/cusparselt"
+
+# Isaac Sim's own omni.isaac.ml_archive extension ships a stub "torch" dir
+# under its pip_prebundle (only a leftover torch/_vendor/packaging file, no
+# __init__.py or real torch code) purely so its extension.toml's `order =
+# -1000` (load-as-early-as-possible) puts pip_prebundle on sys.path before
+# anything else. Because it has no __init__.py, Python treats it as an empty
+# PEP 420 namespace package. Any script that calls AppLauncher() before its
+# own `import torch` (which is exactly what this repo's scripts/rsl_rl/
+# train.py and play.py do) triggers Kit's extension loader to do the
+# process's first `import torch` while pip_prebundle still shadows real
+# site-packages torch, permanently binding sys.modules['torch'] to the empty
+# stub -- every subsequent `import torch` anywhere in the process (including
+# the script's own explicit one) then reuses that same broken cached module,
+# surfacing as "AttributeError: module 'torch' has no attribute
+# 'Tensor'/'jit'" while isaacsim.core.*/isaaclab_assets/isaaclab_tasks load
+# as Kit extensions. Deleting the stub removes the shadow so `import torch`
+# always resolves to the real pinned install regardless of import order.
+RUN rm -rf /app/IsaacLab/_isaac_sim/exts/omni.isaac.ml_archive/pip_prebundle/torch
+
 # Shell aliases
 RUN echo "export ISAACLAB_PATH=${ISAACLAB_PATH}" >> ${DOCKER_USER_HOME}/.bashrc && \
     echo "alias isaaclab=${ISAACLAB_PATH}/isaaclab.sh" >> ${DOCKER_USER_HOME}/.bashrc && \
@@ -96,22 +142,31 @@ RUN echo "export ISAACLAB_PATH=${ISAACLAB_PATH}" >> ${DOCKER_USER_HOME}/.bashrc 
 WORKDIR ${ISAACLAB_PATH}
 
 # ==========================================================================
-# Step 3: CUDA Toolkit 12.8 (for pytorch3d compilation)
+# Step 3: CUDA Toolkit (for pytorch3d compilation)
 # ==========================================================================
+# CUDA_TOOLKIT_PKG/CUDA_TOOLKIT_VERSION must match the CUDA version of the
+# torch build pinned above (torch==2.7.0+cu128), otherwise pytorch3d's
+# build-time CUDA version check fails with "detected CUDA version mismatches
+# the version used to compile PyTorch". Override at build time if you change
+# the pinned torch/CUDA combo above, e.g.:
+#   --build-arg CUDA_TOOLKIT_PKG="cuda-toolkit-13-0" --build-arg CUDA_TOOLKIT_VERSION="13.0"
+ARG CUDA_TOOLKIT_PKG="cuda-toolkit-12-8"
+ARG CUDA_TOOLKIT_VERSION="12.8"
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends wget gnupg && \
     wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
     dpkg -i /tmp/cuda-keyring.deb && \
     rm /tmp/cuda-keyring.deb && \
     apt-get update && \
-    apt-get install -y --no-install-recommends cuda-toolkit-12-8 && \
+    apt-get install -y --no-install-recommends ${CUDA_TOOLKIT_PKG} && \
     rm -rf /var/lib/apt/lists/*
 
-ENV CUDA_HOME=/usr/local/cuda-12.8
+ENV CUDA_HOME=/usr/local/cuda-${CUDA_TOOLKIT_VERSION}
 ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}
 
-RUN echo 'export CUDA_HOME=/usr/local/cuda-12.8' >> /root/.bashrc && \
+RUN echo "export CUDA_HOME=/usr/local/cuda-${CUDA_TOOLKIT_VERSION}" >> /root/.bashrc && \
     echo 'export PATH=${CUDA_HOME}/bin:${PATH}' >> /root/.bashrc && \
     echo 'export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}' >> /root/.bashrc
 
@@ -124,13 +179,8 @@ RUN ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install smplx termcolor dm_tree
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install "git+https://github.com/otaheri/bps_torch"
 
 # pytorch3d from source (requires FORCE_CUDA + no-build-isolation)
-# Fix torch vendor packaging issue by copying from installed packaging
-RUN ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install "packaging>=24.0" && \
-    rm -f /app/IsaacLab/_isaac_sim/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging/_structures.py && \
-    cp /app/IsaacLab/_isaac_sim/kit/python/lib/python3.11/site-packages/packaging/_structures.py \
-       /app/IsaacLab/_isaac_sim/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging/_structures.py
+RUN ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install "packaging>=24.0"
 RUN export FORCE_CUDA=1 && \
-    export CUDA_HOME=/usr/local/cuda-12.8 && \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git" && \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install --no-build-isolation "git+https://github.com/mattloper/chumpy@9b045ff5d6588a24a0bab52c83f032e2ba433e17"
 
@@ -212,10 +262,24 @@ COPY source/ ${MIMIC_MODEL_PATH}/source/
 COPY scripts/ ${MIMIC_MODEL_PATH}/scripts/
 COPY README.md ${MIMIC_MODEL_PATH}/
 
-# Install Extension in editable mode
+# Install Extension in editable mode. `setup.py develop` uses the legacy
+# easy_install dependency resolver, which fails here: while chasing
+# onnxscript's own transitive dependency on typing_extensions, pkg_resources
+# tries to read METADATA out of setuptools' internally vendored
+# typing_extensions copy (setuptools/_vendor/typing_extensions-*.dist-info)
+# instead of the real one we pinned in site-packages, and that vendored
+# dist-info has no METADATA file. `pip install -e .` uses pip's modern
+# resolver instead and doesn't hit this legacy egg-resolution bug.
 RUN cd ${MIMIC_MODEL_PATH}/source/whole_body_tracking && \
-    ${ISAACLAB_PATH}/_isaac_sim/python.sh setup.py develop && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install -e . && \
     echo "whole_body_tracking installed successfully"
+
+# onnxscript (a whole_body_tracking dependency) pulls in typing_extensions
+# unpinned, which silently upgrades it back past 4.12.2 and reintroduces the
+# PEP 696 error pinned against earlier ("Type parameter ... without a
+# default follows type parameter with a default", breaking isaaclab_tasks'
+# extension load). Re-pin after the extension install.
+RUN ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install "typing_extensions==4.12.2"
 
 # Create data placeholder directories
 RUN mkdir -p ${MIMIC_MODEL_PATH}/source/whole_body_tracking/data/ASAP \

@@ -101,11 +101,16 @@ docker exec mimic-model nvidia-smi
 docker exec -it mimic-model bash
 
 # 在容器内执行：
-cd /workspace/mimic_model
-/isaac-sim/python.sh source/whole_body_tracking/setup.py develop
+cd /workspace/mimic_model/source/whole_body_tracking
+/isaac-sim/python.sh -m pip install -e .
 ```
 
-> **说明**：`setup.py develop` 以 editable 模式安装，代码修改立即生效，无需重新安装。
+> **说明**：以 editable 模式安装，代码修改立即生效，无需重新安装。
+>
+> ⚠️ **不要**使用 `setup.py develop`（legacy easy_install 解析器）——在解析 `onnxscript` 的 `typing_extensions` 依赖时会报
+> `error: [Errno 2] No such file or directory` 读取 `setuptools/_vendor/typing_extensions-*.dist-info/METADATA`。
+> 用 `pip install -e .`（pip 现代 resolver）可以避免这个问题。另外必须在 `source/whole_body_tracking` 目录下执行
+> （不能带相对路径从别的目录调用 `setup.py`），因为 `setuptools` 的 `packages=[...]` 是相对 CWD 解析的。
 
 ---
 
@@ -191,6 +196,57 @@ cd /workspace/mimic_model
 | pytorch3d | 0.7.9（源码编译） |
 | CUDA Toolkit | 12.8 |
 | Isaac Lab | 1.4.1 |
+
+---
+
+## 调试记录：RTX 50 系（Blackwell）环境的已知问题与修复（2026-07-10）
+
+以下问题是在下述硬件/驱动环境上从零搭建本环境时实测发现的，均已修复并合并进 Dockerfile。记录在此供以后遇到类似 GPU（sm_120，即 RTX 50 系列 Blackwell 架构）或复现构建问题时参考。
+
+### 调试所用硬件 / 驱动环境
+
+| 项目 | 值 |
+|------|-----|
+| GPU | NVIDIA GeForce RTX 5060 Laptop GPU（8 GB VRAM，笔记本版，本文档"硬件要求"表格里的最低配置） |
+| GPU 架构 | Blackwell，Compute Capability / SM 12.0（`sm_120`） |
+| NVIDIA 驱动版本 | 580.159.03 |
+| 宿主机 OS | Ubuntu 24.04.4 LTS（内核 6.17.0-35-generic） |
+| Docker 版本 | 29.1.3 |
+| nvidia-container-toolkit 版本 | 1.19.1-1 |
+| 容器内 torch | 2.7.0+cu128（`torch.cuda.get_device_capability(0)` 返回 `(12, 0)`） |
+
+> sm_120 不在 torch 2.7.0+cu128 预编译的 SM 列表里，但通过 CUDA 12.8 的 PTX JIT 前向兼容，运行时能自动编译到 sm_120，无需额外升级 CUDA 版本或自行编译 torch。`TORCH_CUDA_ARCH_LIST` 构建参数（用于 pytorch3d 源码编译）需要显式传 `"12.0"`：
+> ```bash
+> --build-arg TORCH_CUDA_ARCH_LIST="12.0"
+> ```
+
+### 已修复的问题
+
+**1. torch 版本未锁定导致拉到不兼容版本**
+`isaaclab_rl`/`rsl-rl-lib` 对 `torch` 的依赖没有锁版本，`isaaclab.sh --install` 会让 pip 解析到最新版（实测拉到 2.13.0+cu130），这个版本和 Isaac Sim 5.0.0 内置的 Kit Python 不兼容，加载 `isaacsim.core.*`/`isaaclab_assets`/`isaaclab_tasks` 等 Kit 扩展时报 `AttributeError: module 'torch' has no attribute 'Tensor'/'jit'`。Dockerfile 现已显式锁定 `torch==2.7.0`、`torchvision==0.22.0`（`cu128` 版）、`typing_extensions==4.12.2`。
+
+**2. torch==2.7.0+cu128 wheel 自带的 cusparselt 库 RPATH 错误**
+该 wheel 里 `libtorch_cuda.so` 等文件的 RPATH 少写了一段路径（`$ORIGIN/../../cusparselt/lib`，应为 `$ORIGIN/../../nvidia/cusparselt/lib`），导致编译 pytorch3d 时因 `import torch` 报 `ImportError: libcusparseLt.so.0: cannot open shared object file`。修复：在 site-packages 下建一个符号链接 `cusparselt -> nvidia/cusparselt`。
+
+**3.（本次最主要的根因）Isaac Sim 自带扩展里一个占位空目录会遮蔽真实 torch 安装**
+`omni.isaac.ml_archive` 扩展的 `pip_prebundle/torch` 目录只剩一个无关紧要的遗留文件，没有 `__init__.py`，因为该扩展设置了 `order = -1000`（最先加载），这个空目录会先于真实 site-packages 出现在 `sys.path` 上。Python 会把它当作一个空的命名空间包。只要脚本是先 `AppLauncher()` 后 `import torch`（`scripts/rsl_rl/train.py`、`play.py` 都是这个顺序），Kit 扩展系统触发的第一次 `import torch` 就会被这个空壳顶替，之后整个进程里 `sys.modules['torch']` 都是这个坏掉的模块，报 `AttributeError: module 'torch' has no attribute 'Tensor'/'jit'`。修复：构建时直接删除这个占位目录（`rm -rf .../omni.isaac.ml_archive/pip_prebundle/torch`）。
+
+**4. `setup.py develop` 的 legacy easy_install 解析器 bug**
+见上方 Step 3 的说明，已改用 `pip install -e .`。
+
+**5. 容器缺少 `openssh-client`**
+基础镜像 `nvcr.io/nvidia/isaac-sim:5.0.0` 没有装 `openssh-client`，仅挂载 `~/.ssh` 不足以在容器内 `git push` / `ssh -T git@github.com`，已加入 Dockerfile 的 apt 依赖列表。若要在容器内直接提交代码，启动容器时还需加上只读挂载：
+```bash
+-v ~/.ssh:/root/.ssh:ro
+```
+
+### 已知但无害、未修复的残留问题
+
+即使以上问题都修复了，Kit 首次自动加载 `isaaclab_tasks` 扩展时日志里仍会出现一条：
+```
+TypeError: Type parameter +RV without a default follows type parameter with a default
+```
+根因是 IsaacLab v2.2.0 的 `isaaclab_tasks` 会无差别 import 仓库内所有示例任务包，其中一个和 G1 无关的 Franka 机械臂任务配置 `import torchvision.utils`，顺带触发了 `torch._inductor.utils.py` 里一段本身就有 PEP 696 顺序问题的代码（`class CachedMethod(Protocol, Generic[P, RV])`，属于 torch 2.7.0+cu128 自身瑕疵）。这只影响 Kit 扩展系统"第一次"自动加载的记录，不影响后续任何脚本正常 `import isaaclab_tasks` 或 gym 环境注册，无需处理。
 
 ---
 
